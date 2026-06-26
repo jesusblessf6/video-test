@@ -1,0 +1,21 @@
+# 虚拟环境
+.venv/
+venv/
+
+# 密钥 / 本地配置（绝不提交）
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Gradio / 运行产物
+.gradio/
+flagged/
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
