@@ -7,14 +7,20 @@
 """
 
 import base64
+import datetime
 import mimetypes
 import os
+from pathlib import Path
 
 import gradio as gr
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# 分析结果自动归档目录
+RESULTS_DIR = Path(__file__).parent / "results"
+RESULTS_DIR.mkdir(exist_ok=True)
 
 BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
 DEFAULT_MODEL = os.getenv("ARK_MODEL", "doubao-seed-2-1-pro-260628")
@@ -58,14 +64,8 @@ def _extract_text(resp: dict) -> str:
     return "\n".join(parts).strip() or "（模型未返回文字内容）"
 
 
-def analyze(video_file, video_url, prompt, model, fps, api_key):
+def _call(url, prompt, model, fps, api_key):
     """组装请求并调用 Ark Responses API，返回模型文字分析。"""
-    url = (video_url or "").strip()
-    if not url and video_file:
-        url = _file_to_data_url(video_file)
-    if not url:
-        raise gr.Error("请上传视频文件，或填入一个视频 URL")
-
     video_part = {"type": "input_video", "video_url": url}
     if fps and float(fps) > 0:
         video_part["fps"] = float(fps)
@@ -87,7 +87,7 @@ def analyze(video_file, video_url, prompt, model, fps, api_key):
         r = requests.post(
             f"{BASE_URL}/responses",
             headers={
-                "Authorization": f"Bearer {_api_key(api_key)}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             json=payload,
@@ -103,6 +103,65 @@ def analyze(video_file, video_url, prompt, model, fps, api_key):
         raise gr.Error(f"调用失败（HTTP {r.status_code}）：{msg}")
 
     return _extract_text(data)
+
+
+# 按钮的「就绪」「分析中」两种外观，供生成器切换。
+BTN_READY = gr.update(value="🚀 开始分析", interactive=True)
+BTN_BUSY = gr.update(value="⏳ 分析中…", interactive=False)
+
+
+def _save_result(text, source, model, fps, prompt):
+    """把一次分析结果连同元信息存为 Markdown，返回文件路径。"""
+    now = datetime.datetime.now()
+    stamp = now.strftime("%Y%m%d_%H%M%S")
+    doc = (
+        f"# 视频分析结果\n\n"
+        f"- 时间：{now.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"- 视频来源：{source}\n"
+        f"- 模型：{(model or '').strip() or DEFAULT_MODEL}\n"
+        f"- 抽帧 fps：{fps}\n"
+        f"- 分析指令：{(prompt or '').strip() or DEFAULT_PROMPT}\n\n"
+        f"---\n\n{text}\n"
+    )
+    path = RESULTS_DIR / f"分析_{stamp}.md"
+    path.write_text(doc, encoding="utf-8")
+    return path
+
+
+def analyze(video_file, video_url, prompt, model, fps, api_key):
+    """界面入口：先校验，再以加载态调用，最后吐结果并自动归档。
+
+    yield 四元组 (结果 Markdown, 状态行, 按钮状态, 下载文件)，让前端有明确反馈。
+    """
+    # —— 即时校验（出错弹 toast，按钮维持就绪态）——
+    url = (video_url or "").strip()
+    source = url  # 归档时记录的视频来源
+    if not url and video_file:
+        source = f"上传文件 {os.path.basename(video_file)}"
+        url = _file_to_data_url(video_file)
+    if not url:
+        raise gr.Error("请上传视频文件，或填入一个视频 URL")
+    key = _api_key(api_key)
+
+    # —— 进入加载态：清空旧结果、显示进度提示、禁用按钮、隐藏旧下载 ——
+    yield "", "⏳ 正在分析视频，请稍候…（通常 10–30 秒，长视频更久）", BTN_BUSY, gr.update(visible=False)
+
+    try:
+        text = _call(url, prompt, model, fps, key)
+    except gr.Error as e:
+        yield f"### ❌ 调用失败\n\n{e.message}", "失败", BTN_READY, gr.update(visible=False)
+        return
+    except Exception as e:  # 兜底，避免界面卡在加载态
+        yield f"### ❌ 出错\n\n```\n{e}\n```", "失败", BTN_READY, gr.update(visible=False)
+        return
+
+    path = _save_result(text, source, model, fps, prompt)
+    yield (
+        text,
+        f"✅ 分析完成 · 已自动保存到 `results/{path.name}`",
+        BTN_READY,
+        gr.update(value=str(path), visible=True),
+    )
 
 
 with gr.Blocks(title="视频分析 · 豆包视频理解") as demo:
@@ -132,16 +191,31 @@ with gr.Blocks(title="视频分析 · 豆包视频理解") as demo:
                     label="API Key（留空则用 .env 里的 ARK_API_KEY）",
                     type="password",
                 )
-            run_btn = gr.Button("开始分析", variant="primary")
+            with gr.Row():
+                run_btn = gr.Button("🚀 开始分析", variant="primary", scale=3)
+                clear_btn = gr.Button("清空", scale=1)
         with gr.Column(scale=1):
-            output = gr.Markdown(label="分析结果")
+            status = gr.Markdown("", elem_id="status")
+            output = gr.Markdown(
+                value="*结果会显示在这里。上传视频或填 URL，点「开始分析」。*",
+                label="分析结果",
+            )
+            download_btn = gr.DownloadButton(
+                "⬇️ 下载结果 (.md)", visible=False
+            )
 
     run_btn.click(
         analyze,
         inputs=[video_in, url_in, prompt_in, model_in, fps_in, key_in],
-        outputs=output,
+        outputs=[output, status, run_btn, download_btn],
+        show_progress="minimal",
+    )
+
+    clear_btn.click(
+        lambda: (None, "", "", "*结果会显示在这里。*", gr.update(visible=False)),
+        outputs=[video_in, url_in, status, output, download_btn],
     )
 
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.queue().launch()

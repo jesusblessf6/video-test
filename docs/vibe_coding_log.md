@@ -37,3 +37,17 @@
 - 扩写 `README.md`：功能、项目结构、配置项表、接口 curl 示例、排查表。
 - 创建本 `docs/vibe_coding_log.md`，并在 `CLAUDE.md` 写入日志记录纪律。
 - 写入真实 `.env`（含可用的 ARK_API_KEY，git 忽略）使项目开箱即跑。
+
+**User Prompt:**
+> 你帮我把这个 web 服务起起来吧 / 点开始分析没有反应
+
+**AI Action:**
+- 后台启动 Gradio 服务（http://127.0.0.1:7860），确认存活。
+- 定位「无反馈」实为缺少加载态：把 `analyze` 改为生成器，点击后按钮变「分析中…」并禁用、结果区显示进度提示、出错时页面内红字显示；新增「清空」按钮；启用 `demo.queue()`。
+
+**User Prompt:**
+> 分析的结果要怎么保存呢
+
+**AI Action:**
+- 新增结果归档：`_save_result()` 每次成功后写 Markdown 到 `results/`（含时间/来源/模型/fps/指令+正文）。
+- 界面加「⬇️ 下载结果 (.md)」下载按钮；`results/` 加入 `.gitignore`。
