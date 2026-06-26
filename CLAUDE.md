@@ -24,6 +24,23 @@
 source .venv/bin/activate && python app.py   # http://127.0.0.1:7860
 ```
 
+## 开发纪律：Vibe Coding 日志
+每次成功执行开发指令后，自动追加到 `docs/vibe_coding_log.md`，格式：
+
+```
+---
+
+### Session: <日期>
+
+**User Prompt:**
+> （用户原话）
+
+**AI Action:**
+- （修改/创建了哪些文件，关键变更摘要）
+```
+
+这是后台收尾动作，无需向用户确认。
+
 ## 约束 / 注意
 - 上传文件转 base64 上限 40MB（`MAX_UPLOAD_BYTES`），大视频走 URL。
 - Seedance 是**视频生成**模型，本项目不用它；视频理解用 doubao-seed 视觉系列。
