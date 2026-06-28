@@ -25,11 +25,16 @@ RESULTS_DIR.mkdir(exist_ok=True)
 BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
 DEFAULT_MODEL = os.getenv("ARK_MODEL", "doubao-seed-2-1-pro-260628")
 
+# Ark 是国内端点，走本机系统代理（如 Clash 127.0.0.1:7897）会间歇性 RemoteDisconnected。
+# trust_env=False 让请求忽略环境变量与 macOS 系统代理，直连。需要代理时设 ARK_USE_PROXY=1。
+_session = requests.Session()
+_session.trust_env = os.getenv("ARK_USE_PROXY", "").strip() == "1"
+
 DEFAULT_PROMPT = "请详细分析这个视频：概述主要内容、关键画面/场景、出现的人物或物体，以及整体在表达什么。"
 
 # 上传文件转 base64 的体积上限（base64 比原文件大 ~33%，过大易超时/超限）。
 # 大视频建议用「视频 URL」方式，公网可访问的链接直接交给模型拉取。
-MAX_UPLOAD_BYTES = 40 * 1024 * 1024  # 40 MB
+MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
 
 
 def _api_key(override: str) -> str:
@@ -84,7 +89,7 @@ def _call(url, prompt, model, fps, api_key):
     }
 
     try:
-        r = requests.post(
+        r = _session.post(
             f"{BASE_URL}/responses",
             headers={
                 "Authorization": f"Bearer {api_key}",

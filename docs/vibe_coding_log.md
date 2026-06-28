@@ -51,3 +51,15 @@
 **AI Action:**
 - 新增结果归档：`_save_result()` 每次成功后写 Markdown 到 `results/`（含时间/来源/模型/fps/指令+正文）。
 - 界面加「⬇️ 下载结果 (.md)」下载按钮；`results/` 加入 `.gitignore`。
+
+---
+
+### Session: 2026-06-29
+
+**User Prompt:**
+> 当前这个系统跑起来 / 一直报 RemoteDisconnected / 上传体积限制 / 改到 200m
+
+**AI Action:**
+- 搭运行环境：创建 `.venv`、装依赖、写 `.env`（已 gitignore），后台启动 Gradio。
+- 修复出站请求被本机系统代理（Clash 127.0.0.1:7897）拦截导致的 `RemoteDisconnected`/`SSLError`：`app.py` 改用 `trust_env=False` 的 `requests.Session` 直连，新增 `ARK_USE_PROXY=1` 开关回退走代理。
+- 按需求把 `MAX_UPLOAD_BYTES` 由 40MB 调到 200MB；并说明内联 base64 受服务端请求体上限约束，大视频仍建议走「视频 URL」。
