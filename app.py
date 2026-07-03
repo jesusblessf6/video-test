@@ -30,7 +30,12 @@ DEFAULT_MODEL = os.getenv("ARK_MODEL", "doubao-seed-2-1-pro-260628")
 _session = requests.Session()
 _session.trust_env = os.getenv("ARK_USE_PROXY", "").strip() == "1"
 
-DEFAULT_PROMPT = "请详细分析这个视频：概述主要内容、关键画面/场景、出现的人物或物体，以及整体在表达什么。"
+DEFAULT_PROMPT = (
+    "我当前是一个短剧素材投流的投手，上面这个视频是一个表现很好的投流素材，"
+    "我想学习它的剪辑方式。请从短剧的角度分析这个素材的特点是什么、"
+    "为什么能够有好的表现。输出的内容不要虚的，都要是能落地的干货，"
+    "且能方便地转化为 agent skill 快速投产。"
+)
 
 # 上传文件转 base64 的体积上限（base64 比原文件大 ~33%，过大易超时/超限）。
 # 大视频建议用「视频 URL」方式，公网可访问的链接直接交给模型拉取。
