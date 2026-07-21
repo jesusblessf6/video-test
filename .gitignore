@@ -19,6 +19,9 @@ flagged/
 # 分析结果归档（按需保留，默认不入库）
 results/
 
+# 超限视频下载/压缩暂存
+tmp/
+
 # 编辑器 / 系统
 .DS_Store
 .idea/

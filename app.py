@@ -10,6 +10,8 @@ import base64
 import datetime
 import mimetypes
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import gradio as gr
@@ -22,6 +24,10 @@ load_dotenv()
 RESULTS_DIR = Path(__file__).parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
+# 超限 URL 视频的下载/压缩暂存目录（已 gitignore，可定期手动清理）
+TMP_DIR = Path(__file__).parent / "tmp"
+TMP_DIR.mkdir(exist_ok=True)
+
 BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
 DEFAULT_MODEL = os.getenv("ARK_MODEL", "doubao-seed-2-1-pro-260628")
 
@@ -32,14 +38,25 @@ _session.trust_env = os.getenv("ARK_USE_PROXY", "").strip() == "1"
 
 DEFAULT_PROMPT = (
     "我当前是一个短剧素材投流的投手，上面这个视频是一个表现很好的投流素材，"
-    "我想学习它的剪辑方式。请从短剧的角度分析这个素材的特点是什么、"
-    "为什么能够有好的表现。输出的内容不要虚的，都要是能落地的干货，"
-    "且能方便地转化为 agent skill 快速投产。"
+    "我想学习它的剪辑方式，并把结论沉淀为可复用的 agent skill。\n\n"
+    "【输入说明】视频按抽帧（fps 可调）加音轨输入。画面或台词看不清、听不准的地方，"
+    "直接标注「不确定」，严禁编造。\n\n"
+    "【输出要求】用 Markdown 严格按以下结构输出，每节都必须有，某节确实没有内容就写「无」：\n"
+    "1. 素材概览：题材、时长、目标人群、核心矛盾/卖点（一段话）。\n"
+    "2. 分镜拆解：Markdown 表格，按时间顺序列关键镜头：时间区间 | 画面内容 | 台词/字幕 | 剪辑手法 | 作用。\n"
+    "3. 剪辑手法清单：逐条拆解节奏、转场、字幕花字、BGM/音效、钩子设计，"
+    "每条 = 具体做法 + 出现时间点 + 为什么有效。\n"
+    "4. 可复用 SOP：把手法抽象成硬标准，每条 = 操作标准（尽量量化：秒数、字数、镜头数）"
+    "+ 可直接照抄的示例 + 适用题材。\n"
+    "5. 投产 Checklist：把 SOP 转成「如果…就…」的规则清单，方便直接写成 agent skill。\n\n"
+    "【质量红线】只要能量化的就必须量化；禁止「注意节奏」「画面要有张力」这类无法执行的虚话；"
+    "标注「不确定」不影响其余部分照常输出。"
 )
 
-# 上传文件转 base64 的体积上限（base64 比原文件大 ~33%，过大易超时/超限）。
-# 大视频建议用「视频 URL」方式，公网可访问的链接直接交给模型拉取。
-MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
+# Ark 服务端对输入视频的硬性上限是 50 MiB（实测：148 MiB 视频返回 HTTP 400）。
+# 该限制与传入方式无关：base64 上传和公网 URL（Ark 服务端拉取）都受限。
+# 超限视频只能先压缩/裁剪（如 ffmpeg）再分析。
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MiB，与 Ark 上限对齐
 
 
 def _api_key(override: str) -> str:
@@ -53,13 +70,89 @@ def _file_to_data_url(path: str) -> str:
     size = os.path.getsize(path)
     if size > MAX_UPLOAD_BYTES:
         raise gr.Error(
-            f"视频过大（{size / 1024 / 1024:.1f} MB，上限 {MAX_UPLOAD_BYTES // 1024 // 1024} MB）。"
-            "请改用「视频 URL」方式，填入一个公网可访问的视频链接。"
+            f"视频过大（{size / 1024 / 1024:.1f} MB，Ark 上限 {MAX_UPLOAD_BYTES // 1024 // 1024} MB，"
+            "URL 方式同样受限）。请先压缩/裁剪再分析，例如：\n"
+            "ffmpeg -i 原视频.mp4 -vf scale=-2:720 -crf 28 压缩后.mp4"
         )
     mime = mimetypes.guess_type(path)[0] or "video/mp4"
     with open(path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
     return f"data:{mime};base64,{b64}"
+
+
+# 下载体积安全上限，防止异常 URL 把磁盘打满
+MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
+
+
+def _remote_size(url: str):
+    """HEAD 探测远程视频体积（字节），失败或无 Content-Length 返回 None。"""
+    try:
+        r = _session.head(url, timeout=10, allow_redirects=True)
+        n = r.headers.get("content-length", "")
+        return int(n) if n.isdigit() else None
+    except requests.RequestException:
+        return None
+
+
+def _download_video(url: str) -> str:
+    """把远程视频流式下载到 tmp/，返回本地路径。"""
+    dst = TMP_DIR / f"下载_{datetime.datetime.now():%Y%m%d_%H%M%S}.mp4"
+    try:
+        with _session.get(url, stream=True, timeout=(10, 60)) as r:
+            if r.status_code != 200:
+                raise gr.Error(f"视频下载失败（HTTP {r.status_code}）")
+            downloaded = 0
+            with open(dst, "wb") as f:
+                for chunk in r.iter_content(1 << 20):
+                    downloaded += len(chunk)
+                    if downloaded > MAX_DOWNLOAD_BYTES:
+                        raise gr.Error("视频超过 2GB，超出本 demo 的处理能力，请自行裁剪")
+                    f.write(chunk)
+    except requests.RequestException as e:
+        raise gr.Error(f"视频下载失败：{e}")
+    return str(dst)
+
+
+def _probe_duration(path: str):
+    """ffprobe 取视频时长（秒），失败返回 None。"""
+    if not shutil.which("ffprobe"):
+        return None
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=60,
+        )
+        return float(out.stdout.strip())
+    except (subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _compress_video(src: str) -> str:
+    """把本地视频压到 50 MiB 以内（按时长反推码率，720p→480p 两轮保底），返回输出路径。"""
+    if not shutil.which("ffmpeg"):
+        raise gr.Error("视频超过 50MB 需要压缩，但本机未安装 ffmpeg（brew install ffmpeg）")
+    dst = TMP_DIR / f"压缩_{datetime.datetime.now():%Y%m%d_%H%M%S}.mp4"
+    duration = _probe_duration(src)
+    for height, margin, crf in ((720, 0.9, 30), (480, 0.55, 36)):
+        cmd = ["ffmpeg", "-y", "-i", src, "-vf", f"scale=-2:'min({height},ih)'"]
+        if duration:
+            # 目标码率 = 目标体积（留 margin 余量）/ 时长；音频 96k，其余给视频，150k 保底
+            v_kbps = max(int(MAX_UPLOAD_BYTES * margin * 8 / duration / 1000) - 96, 150)
+            cmd += ["-b:v", f"{v_kbps}k", "-maxrate", f"{v_kbps}k",
+                    "-bufsize", f"{v_kbps * 2}k"]
+        else:  # 拿不到时长就按固定 crf 压
+            cmd += ["-crf", str(crf)]
+        cmd += ["-b:a", "96k", "-movflags", "+faststart", str(dst)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        if proc.returncode != 0:
+            raise gr.Error(f"ffmpeg 压缩失败：{proc.stderr[-300:]}")
+        if dst.stat().st_size <= MAX_UPLOAD_BYTES:
+            return str(dst)
+    raise gr.Error(
+        f"压缩两轮后仍超 50MB（{dst.stat().st_size / 1048576:.0f}MB），"
+        "视频可能太长，请手动裁剪/压缩后再试"
+    )
 
 
 def _extract_text(resp: dict) -> str:
@@ -155,6 +248,27 @@ def analyze(video_file, video_url, prompt, model, fps, api_key):
 
     # —— 进入加载态：清空旧结果、显示进度提示、禁用按钮、隐藏旧下载 ——
     yield "", "⏳ 正在分析视频，请稍候…（通常 10–30 秒，长视频更久）", BTN_BUSY, gr.update(visible=False)
+
+    # —— URL 视频预检：超过 50 MiB 先下载到本地压缩，再改走 base64 ——
+    if url.startswith(("http://", "https://")):
+        size = _remote_size(url)
+        if size and size > MAX_UPLOAD_BYTES:
+            yield (
+                "",
+                f"⏳ 视频约 {size / 1048576:.0f}MB，超过 50MB 上限，"
+                "正在下载并压缩（可能需几分钟）…",
+                BTN_BUSY,
+                gr.update(visible=False),
+            )
+            try:
+                packed = _compress_video(_download_video(url))
+            except gr.Error as e:
+                yield f"### ❌ 预处理失败\n\n{e.message}", "失败", BTN_READY, gr.update(visible=False)
+                return
+            packed_mb = os.path.getsize(packed) / 1048576
+            source = f"{url}（原约 {size / 1048576:.0f}MB，已自动压缩至 {packed_mb:.1f}MB）"
+            url = _file_to_data_url(packed)  # 压缩结果必然 ≤50 MiB，这里同时完成 base64 封装
+            yield "", "⏳ 压缩完成，正在分析视频…", BTN_BUSY, gr.update(visible=False)
 
     try:
         text = _call(url, prompt, model, fps, key)

@@ -63,3 +63,31 @@
 - 搭运行环境：创建 `.venv`、装依赖、写 `.env`（已 gitignore），后台启动 Gradio。
 - 修复出站请求被本机系统代理（Clash 127.0.0.1:7897）拦截导致的 `RemoteDisconnected`/`SSLError`：`app.py` 改用 `trust_env=False` 的 `requests.Session` 直连，新增 `ARK_USE_PROXY=1` 开关回退走代理。
 - 按需求把 `MAX_UPLOAD_BYTES` 由 40MB 调到 200MB；并说明内联 base64 受服务端请求体上限约束，大视频仍建议走「视频 URL」。
+
+
+---
+
+### Session: 2026-07-20
+
+**User Prompt:**
+> 我从界面提供的提示词是视频分析的大方向，你看能不能在提示词中增加一些对输入输出的规范化要求
+
+**AI Action:**
+- 扩写 `app.py` 的 `DEFAULT_PROMPT`：新增【输入说明】（抽帧+音轨输入，看不清处标「不确定」禁止编造）、【输出要求】（固定 5 节：素材概览/分镜拆解表格/剪辑手法清单/可复用 SOP/投产 Checklist，每条含量化标准+示例）、【质量红线】（必须量化、禁止虚话）。
+
+**User Prompt:**
+> 调用失败（HTTP 400）：the size of the input video (148 MiB) exceeds the limit (50 MiB)
+
+**AI Action:**
+- 实测确认 Ark 服务端对输入视频硬性上限 50 MiB，base64 上传与公网 URL 均受限（README 此前「过大改 URL」建议无效）。
+- `MAX_UPLOAD_BYTES` 由 200MB 下调为 50 MiB 对齐 Ark 上限，上传超限时报错信息改为提示先 ffmpeg 压缩。
+- 同步修正 `README.md`（用法+排查表）与 `CLAUDE.md` 中过时的 40MB/200MB 说法。
+
+**User Prompt:**
+> 能不能直接在上传链接的时候，判断视频大小，如果超过限制就下载到本地压缩。整体做到这个demo页面中
+
+**AI Action:**
+- `app.py` 新增 URL 视频超限自动处理链：`_remote_size()`（HEAD 探测 Content-Length）→ 超 50 MiB 时 `_download_video()` 流式下载到 `tmp/`（2GB 安全上限）→ `_compress_video()` 用 ffmpeg 按时长反推码率压到限额内（720p→480p 两轮保底，拿不到时长退 crf 模式）→ 转 base64 提交；`analyze()` 生成器中途 yield「下载并压缩中」「压缩完成」状态。
+- HEAD 探测不到大小时保持原直连行为；本地上传超限仍是直接报错提示。
+- 离线实测通过：69.2MB/600s 测试视频经本地 http.server 走全流程，压到 20.7MB 且时长完整。
+- `tmp/` 加入 `.gitignore`；README（功能/用法/排查表）与 CLAUDE.md 同步更新。

@@ -42,6 +42,6 @@ source .venv/bin/activate && python app.py   # http://127.0.0.1:7860
 这是后台收尾动作，无需向用户确认。
 
 ## 约束 / 注意
-- 上传文件转 base64 上限 40MB（`MAX_UPLOAD_BYTES`），大视频走 URL。
+- Ark 服务端限制单个输入视频 **50 MiB**（实测 HTTP 400）。本地上传超限直接报错；URL 视频超限走 `_remote_size()` HEAD 预检 → `_download_video()` 下载到 `tmp/` → `_compress_video()` ffmpeg 压到限额内（需本机 ffmpeg/ffprobe），再转 base64 提交。
 - Seedance 是**视频生成**模型，本项目不用它；视频理解用 doubao-seed 视觉系列。
 - `.env` 含密钥，已在 `.gitignore`，切勿提交。
