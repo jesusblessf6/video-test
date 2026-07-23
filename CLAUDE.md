@@ -16,8 +16,11 @@
 - 响应解析：取 `output[]` 中 `type=="message"` 项的 `content[].output_text`，跳过 `type=="reasoning"` 项
 
 ## 文件
-- `app.py` — 全部逻辑：组装请求 `analyze()`、解析 `_extract_text()`、Gradio 界面
+- `app.py` — 全部逻辑：组装请求 `analyze()`、提炼 `distill_library()`、解析 `_extract_text()`、Gradio 双标签页界面
 - `.env` — `ARK_API_KEY` / `ARK_BASE_URL` / `ARK_MODEL`（从 `.env.example` 复制，不提交）
+- `results/分析_*.md` — 分析结果归档（git 忽略）
+- `skills/短剧剪辑手段库/SKILL.md` — 从分析文档提炼的原子剪辑手段库（核心资产，入库；合并规则：相同合并、冲突并存）
+- `skills/短剧剪辑手段库/RECIPES.md` — 原型配方：同来源手段卡按环节聚合（`_build_recipes()` 机械生成，提炼时同步更新）
 
 ## 运行
 ```bash
@@ -43,5 +46,7 @@ source .venv/bin/activate && python app.py   # http://127.0.0.1:7860
 
 ## 约束 / 注意
 - Ark 服务端限制单个输入视频 **50 MiB**（实测 HTTP 400）。本地上传超限直接报错；URL 视频超限走 `_remote_size()` HEAD 预检 → `_download_video()` 下载到 `tmp/` → `_compress_video()` ffmpeg 压到限额内（需本机 ffmpeg/ffprobe），再转 base64 提交。
+- Ark 走非流式响应，推理模型长输出慢，`_post()` 超时统一 900s。
+- 界面为三标签页：「🎬 视频分析」（双模式：素材拆解 `MODE_ANALYZE` → `分析_*.md` 进提炼；原剧选段 `MODE_SCOUT` → `SCOUT_PROMPT` 自动拼接手段库全文，产出 `选段_*.md` 不进提炼）+「🧰 剪辑手段库」+「🧬 原型配方」。
 - Seedance 是**视频生成**模型，本项目不用它；视频理解用 doubao-seed 视觉系列。
 - `.env` 含密钥，已在 `.gitignore`，切勿提交。
