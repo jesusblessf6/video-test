@@ -118,3 +118,19 @@
 - `app.py` 新增 `MODE_SCOUT` 原剧选段模式：`SCOUT_PROMPT`（输出剧情梗概+人物表、按环节分组的高能点位图：时间区间/画面/台词/命中手段/能量评分/理解成本），提交时自动拼接 SKILL.md 全文做选段标准；产出存 `选段_*.md` 与 `分析_*.md` 隔离（`_save_result()` 加 prefix 参数），不进提炼。
 - 分析页加模式 Radio，切换时 prompt 文本框联动默认值。
 - 离线验证：归档隔离、prompt 拼接、UI 构建均通过。
+
+**User Prompt:**
+> 再增加一个素材生成页面：上传短剧原始视频，需要压缩就本地压缩完再上传；模型先理解短剧，再根据选定的配方给出剪辑方法；具体剪辑由本地/云主机按剪辑方法调 ffmpeg 执行
+
+**AI Action:**
+- 新增第四个标签页「🎞️ 素材生成」：`generate_material()` 上传原剧超 50 MiB 自动 `_compress_video()` 本地压缩再提交（分析页上传仍是报错提示，本页按需求改为自动压缩）；`_recipe_choices()`/`_recipe_content()` 从 RECIPES.md 解析配方下拉（含「自由发挥」回退手段库全文）；`PLAN_PROMPT` 注入选定配方 + 目标时长，输出剪辑时间线（素材时间↔原剧区间+字幕/音效/对应手段）+ ```json cuts 执行清单（src_start/src_end/dst_start/overlay_text/note，供 ffmpeg 裁剪拼接）；方案存 `方案_*.md` 不进提炼。
+- 重构：URL 超限预检抽为共享生成器 `_resolve_remote()`，analyze() 与 generate_material() 复用；页面按钮独立状态（BTN_GEN_*）。
+- 离线验证：配方解析、prompt 组装、_resolve_remote 直通/超限双路径（本地 http.server + 压缩打桩）均通过。
+
+**User Prompt:**
+> 现在你能执行一次这个skill吗（snapshot 防断片快照）
+
+**AI Action:**
+- 按 snapshot skill 四步执行：探索项目 → 升级 `CLAUDE.md` 为完整「开机简报」（新增技术选型表、流水线 ASCII 图、核心函数索引、产出文件约定表、当前状态/下一步），保留有效的 API 约定/约束/开发纪律。
+- 确认 vibe log 位置（`docs/vibe_coding_log.md`）与纪律条款。
+- 已将 snapshot skill symlink 至 `~/.agents/skills/snapshot`（用户级，后续会话可用）。

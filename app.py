@@ -256,6 +256,9 @@ def _call_text(prompt, model, api_key):
 # 按钮的「就绪」「分析中」两种外观，供生成器切换。
 BTN_READY = gr.update(value="🚀 开始分析", interactive=True)
 BTN_BUSY = gr.update(value="⏳ 分析中…", interactive=False)
+# 「素材生成」页按钮的两种外观
+BTN_GEN_READY = gr.update(value="🎬 生成剪辑方案", interactive=True)
+BTN_GEN_BUSY = gr.update(value="⏳ 生成中…", interactive=False)
 
 
 def _save_result(text, source, model, fps, prompt, prefix="分析"):
@@ -277,6 +280,25 @@ def _save_result(text, source, model, fps, prompt, prefix="分析"):
     path = RESULTS_DIR / f"{prefix}_{stamp}.md"
     path.write_text(doc, encoding="utf-8")
     return path
+
+
+def _resolve_remote(url, source, out):
+    """URL 视频预检（生成器）：超 50 MiB 下载压缩改走 base64。
+
+    yield 状态行字符串；结果写 out["url"] / out["source"]；出错抛 gr.Error 由调用方兜底。
+    """
+    out["url"], out["source"] = url, source
+    size = _remote_size(url)
+    if size and size > MAX_UPLOAD_BYTES:
+        yield (
+            f"⏳ 视频约 {size / 1048576:.0f}MB，超过 50MB 上限，"
+            "正在下载并压缩（可能需几分钟）…"
+        )
+        packed = _compress_video(_download_video(url))
+        packed_mb = os.path.getsize(packed) / 1048576
+        out["source"] = f"{url}（原约 {size / 1048576:.0f}MB，已自动压缩至 {packed_mb:.1f}MB）"
+        out["url"] = _file_to_data_url(packed)  # 压缩结果必然 ≤50 MiB，这里同时完成 base64 封装
+        yield "⏳ 压缩完成，继续处理…"
 
 
 def analyze(video_file, video_url, prompt, model, fps, api_key, mode):
@@ -308,24 +330,14 @@ def analyze(video_file, video_url, prompt, model, fps, api_key, mode):
 
     # —— URL 视频预检：超过 50 MiB 先下载到本地压缩，再改走 base64 ——
     if url.startswith(("http://", "https://")):
-        size = _remote_size(url)
-        if size and size > MAX_UPLOAD_BYTES:
-            yield (
-                "",
-                f"⏳ 视频约 {size / 1048576:.0f}MB，超过 50MB 上限，"
-                "正在下载并压缩（可能需几分钟）…",
-                BTN_BUSY,
-                gr.update(visible=False),
-            )
-            try:
-                packed = _compress_video(_download_video(url))
-            except gr.Error as e:
-                yield f"### ❌ 预处理失败\n\n{e.message}", "失败", BTN_READY, gr.update(visible=False)
-                return
-            packed_mb = os.path.getsize(packed) / 1048576
-            source = f"{url}（原约 {size / 1048576:.0f}MB，已自动压缩至 {packed_mb:.1f}MB）"
-            url = _file_to_data_url(packed)  # 压缩结果必然 ≤50 MiB，这里同时完成 base64 封装
-            yield "", "⏳ 压缩完成，正在分析视频…", BTN_BUSY, gr.update(visible=False)
+        holder = {}
+        try:
+            for st in _resolve_remote(url, source, holder):
+                yield "", st, BTN_BUSY, gr.update(visible=False)
+        except gr.Error as e:
+            yield f"### ❌ 预处理失败\n\n{e.message}", "失败", BTN_READY, gr.update(visible=False)
+            return
+        url, source = holder["url"], holder["source"]
 
     try:
         text = _call(url, final_prompt, model, fps, key)
@@ -509,6 +521,103 @@ def _load_recipes() -> str:
     return "*还没有配方。先在「剪辑手段库」页点「从分析结果提炼/更新」，配方会随手段库一起生成。*"
 
 
+# —— 素材生成：原剧 + 选定配方 → 剪辑方案单（含 ffmpeg 可执行的裁剪 JSON） ——
+
+# 剪辑方案指令。{recipe} 和 {duration} 为占位符，用 replace 注入。
+PLAN_PROMPT = """你是短剧投流素材的剪辑指导。上面这个视频是一部原始短剧（未剪辑的正片），请完整理解剧情后，按我选定的「剪辑配方」给出一份可直接执行的剪辑方案。
+
+【输入说明】视频按抽帧（fps 可调）加音轨输入。画面或台词看不清、听不准的地方，直接标注「不确定」，严禁编造时间点和台词。
+
+【选定配方】
+{recipe}
+
+【输出要求】用 Markdown 严格按以下结构输出：
+1. 方案概述：题材受众、选用配方、整体思路（3-5 句）。
+2. 剪辑时间线：Markdown 表格，按素材播放顺序排列：素材时间 | 原剧时间区间（精确到秒）| 画面内容 | 字幕/花字（内容+样式）| 音效/BGM | 对应配方手段 | 作用。
+   - 素材总时长目标 {duration} 秒（可上下浮动 10%）。
+   - 钩子段必须放全剧评分最高的冲突画面；每段注明脱离上下文能否 3 秒看懂，看不懂的必须用花字补背景。
+3. 执行清单：一个 ```json 代码块，cuts 数组按播放顺序排列，每项格式：
+   {"src_start": 起点秒数, "src_end": 终点秒数, "dst_start": 在素材中的起点秒数, "overlay_text": "叠加字幕/花字，无则空串", "note": "配乐/音效/停顿等备注，无则空串"}
+   供 ffmpeg 程序按 src 区间从原剧裁剪、按 dst 顺序拼接。
+
+【质量红线】所有时间区间必须来自实际画面；宁可少切不可编造；配方中明确要求的手法必须在方案里体现并标注对应段落。
+"""
+
+
+def _recipe_choices() -> list:
+    """配方下拉选项：['配方 · xx', ...]，外加「自由发挥」。数据来自 RECIPES.md。"""
+    names = []
+    if RECIPES_PATH.exists():
+        names = re.findall(r"(?m)^## (配方 .+)$", RECIPES_PATH.read_text(encoding="utf-8"))
+    return names + ["（自由发挥：不指定配方，按手段库通用标准出方案）"]
+
+
+def _recipe_content(name: str) -> str:
+    """按标题取配方全文（## 到下一个 ## 之间）；自由发挥时返回手段库全文。"""
+    if name.startswith("（自由发挥"):
+        return SKILL_PATH.read_text(encoding="utf-8") if SKILL_PATH.exists() else "（手段库为空）"
+    text = RECIPES_PATH.read_text(encoding="utf-8") if RECIPES_PATH.exists() else ""
+    m = re.search(rf"(?ms)^## {re.escape(name)}\n(.+?)(?=^## |\Z)", text)
+    return ("## " + name + "\n" + m.group(1)).strip() if m else "（未找到配方内容，请刷新配方列表）"
+
+
+def generate_material(video_file, video_url, recipe_name, duration, model, fps, api_key):
+    """界面入口：原剧视频 + 选定配方 → 剪辑方案单，存 方案_*.md。
+
+    本页上传的原剧通常较大：本地文件超 50 MiB 先 _compress_video 再提交（不报错）；
+    URL 走 _resolve_remote 同一套预检。
+    """
+    key = _api_key(api_key)
+    recipe_name = recipe_name or "（自由发挥：不指定配方，按手段库通用标准出方案）"
+    yield "", "⏳ 准备视频…", BTN_GEN_BUSY, gr.update(visible=False)
+
+    # —— 视频准备：上传超限本地压缩；URL 走共享预检 ——
+    url = (video_url or "").strip()
+    source = url
+    try:
+        if not url and video_file:
+            source = f"上传文件 {os.path.basename(video_file)}"
+            if os.path.getsize(video_file) > MAX_UPLOAD_BYTES:
+                raw_mb = os.path.getsize(video_file) / 1048576
+                yield "", f"⏳ 视频约 {raw_mb:.0f}MB 超限，正在本地压缩…", BTN_GEN_BUSY, gr.update(visible=False)
+                packed = _compress_video(video_file)
+                source += f"（原约 {raw_mb:.0f}MB，已压缩至 {os.path.getsize(packed) / 1048576:.1f}MB）"
+                video_file = packed
+            url = _file_to_data_url(video_file)
+        if not url:
+            raise gr.Error("请上传短剧原始视频，或填入一个视频 URL")
+        if url.startswith(("http://", "https://")):
+            holder = {}
+            for st in _resolve_remote(url, source, holder):
+                yield "", st, BTN_GEN_BUSY, gr.update(visible=False)
+            url, source = holder["url"], holder["source"]
+    except gr.Error as e:
+        yield f"### ❌ 预处理失败\n\n{e.message}", "失败", BTN_GEN_READY, gr.update(visible=False)
+        return
+
+    # —— 组装指令并调用 ——
+    final_prompt = PLAN_PROMPT.replace("{recipe}", _recipe_content(recipe_name)).replace(
+        "{duration}", str(int(duration or 120))
+    )
+    yield "", "⏳ 模型正在理解剧情并出剪辑方案（长视频可能需几分钟）…", BTN_GEN_BUSY, gr.update(visible=False)
+    try:
+        text = _call(url, final_prompt, model, fps, key)
+    except gr.Error as e:
+        yield f"### ❌ 调用失败\n\n{e.message}", "失败", BTN_GEN_READY, gr.update(visible=False)
+        return
+    except Exception as e:  # 兜底，避免界面卡在加载态
+        yield f"### ❌ 出错\n\n```\n{e}\n```", "失败", BTN_GEN_READY, gr.update(visible=False)
+        return
+
+    path = _save_result(text, source, model, fps, f"剪辑方案（{recipe_name}）", prefix="方案")
+    yield (
+        text,
+        f"✅ 方案已生成 · 已自动保存到 `results/{path.name}`",
+        BTN_GEN_READY,
+        gr.update(value=str(path), visible=True),
+    )
+
+
 with gr.Blocks(title="视频分析 · 豆包视频理解") as demo:
     with gr.Tabs():
         with gr.Tab("🎬 视频分析"):
@@ -604,6 +713,52 @@ with gr.Blocks(title="视频分析 · 豆包视频理解") as demo:
 
             recipe_reload_btn.click(_load_recipes, outputs=recipe_md)
             recipe_tab.select(_load_recipes, outputs=recipe_md)
+
+        with gr.Tab("🎞️ 素材生成") as gen_tab:
+            gr.Markdown(
+                "上传短剧原始视频（超 50MB 自动本地压缩后再提交），选定配方后，"
+                "模型理解剧情并输出剪辑方案单（剪辑时间线 + ffmpeg 可执行的裁剪 JSON），"
+                "实际剪辑由本地/云主机按方案调用 ffmpeg 完成。模型与 API Key 沿用「视频分析」页的设置。"
+            )
+            with gr.Row():
+                with gr.Column(scale=1):
+                    gen_video_in = gr.Video(label="上传短剧原始视频", sources=["upload"])
+                    gen_url_in = gr.Textbox(
+                        label="或：视频 URL（公网可访问，超 50MB 自动下载压缩）",
+                        placeholder="https://example.com/episode.mp4",
+                    )
+                    with gr.Row():
+                        gen_recipe_in = gr.Dropdown(
+                            choices=_recipe_choices(),
+                            value=None,
+                            label="选定配方（无合适配方可选自由发挥）",
+                            scale=4,
+                        )
+                        gen_recipe_reload = gr.Button("↻", scale=1, min_width=36)
+                    gen_duration_in = gr.Slider(
+                        label="目标素材时长（秒）",
+                        minimum=30, maximum=300, step=10, value=120,
+                    )
+                    gen_run_btn = gr.Button("🎬 生成剪辑方案", variant="primary")
+                with gr.Column(scale=1):
+                    gen_status = gr.Markdown("")
+                    gen_output = gr.Markdown(
+                        value="*剪辑方案会显示在这里。*", label="剪辑方案单"
+                    )
+                    gen_download_btn = gr.DownloadButton(
+                        "⬇️ 下载方案 (.md)", visible=False
+                    )
+
+            gen_recipe_reload.click(
+                lambda: gr.update(choices=_recipe_choices()), outputs=gen_recipe_in
+            )
+            gen_run_btn.click(
+                generate_material,
+                inputs=[gen_video_in, gen_url_in, gen_recipe_in, gen_duration_in, model_in, fps_in, key_in],
+                outputs=[gen_output, gen_status, gen_run_btn, gen_download_btn],
+                show_progress="minimal",
+            )
+            gen_tab.select(lambda: gr.update(choices=_recipe_choices()), outputs=gen_recipe_in)
 
 
 if __name__ == "__main__":
